@@ -1,0 +1,19 @@
+CompressorTach V0.1 - Core JVM Test Summary
+Test date: 2026-10-15
+Environment: OpenJDK 21 on Linux (no Android SDK available)
+
+The command used:
+javac -encoding UTF-8 -d tests/out app/src/main/java/com/compwave/tach/VibrationSample.java app/src/main/java/com/compwave/tach/RpmAnalyzer.java tests/AnalyzerSelfTest.java
+java -Dfile.encoding=UTF-8 -cp tests/out AnalyzerSelfTest
+
+Synthetic test scenarios passed:
+- 3000 RPM (50 Hz) with strong 2x/3x components at 400 samples/s.
+- 2400 RPM (40 Hz) with strong 2x components at 250 samples/s.
+- 1800 RPM (30 Hz) mixed harmonics at 200 samples/s.
+- 4500 RPM (75 Hz) at 200 samples/s when the user narrows the search range to 3000-4800 RPM.
+- High-frequency harmonic alias ambiguity at 200 samples/s detected and confidence marked low.
+- Insufficient sampling at 120 samples/s marked low.
+
+Caution:
+These are deterministic synthetic-data tests, NOT actual Android builds, sensor tests,
+or field accuracy verifications. No APK was built on this host.
