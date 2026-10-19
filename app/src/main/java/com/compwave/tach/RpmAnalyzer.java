@@ -7,9 +7,9 @@ import java.util.List;
 /**
  * Pure Java RPM estimator, independent of Android.
  *
- * IMPORTANT: one-axis acceleration can contain weak/missing 1x and strong 2x/3x.
- * Results are estimates, NOT a certified shaft-speed measurement. The algorithm
- * reports low confidence rather than claiming a unique RPM when evidence is weak.
+ * The strongest detectable spectral peak is the primary RPM hypothesis.
+ * A dominant peak may represent 1x, 2x or 3x excitation, so alternative
+ * interpretations are also returned. This is NOT a calibrated tachometer.
  */
 public final class RpmAnalyzer {
     public static final double WINDOW_SECONDS = 5.0;
@@ -26,11 +26,16 @@ public final class RpmAnalyzer {
         public final double[] spectrumHz, spectrumDb;
         public final int supportedHarmonics;
         public final double durationSeconds;
+        public final double dominantPeakHz;
+        public final int primaryOrder;
+        public final double[] possibleRpm;
+        public final int[] possibleOrders;
 
         private Result(boolean valid, double rpm, double fundamentalHz, double sampleRateHz,
                 double resolutionHz, double rmsMs2, double snrDb, String confidence,
                 String note, String axisLabel, double[] spectrumHz, double[] spectrumDb,
-                int supportedHarmonics, double durationSeconds) {
+                int supportedHarmonics, double durationSeconds, double dominantPeakHz,
+                int primaryOrder, double[] possibleRpm, int[] possibleOrders) {
             this.valid = valid;
             this.rpm = rpm;
             this.fundamentalHz = fundamentalHz;
@@ -45,18 +50,28 @@ public final class RpmAnalyzer {
             this.spectrumDb = spectrumDb;
             this.supportedHarmonics = supportedHarmonics;
             this.durationSeconds = durationSeconds;
+            this.dominantPeakHz = dominantPeakHz;
+            this.primaryOrder = primaryOrder;
+            this.possibleRpm = possibleRpm;
+            this.possibleOrders = possibleOrders;
         }
     }
 
     private static Result invalid(String msg, double fs, double duration) {
         return new Result(false, Double.NaN, Double.NaN, fs, duration > 0 ? 1.0 / duration : 0,
-                0, 0, "不足", msg, "—", new double[0], new double[0], 0, duration);
+                0, 0, "不足", msg, "—", new double[0], new double[0], 0, duration,
+                Double.NaN, 0, new double[0], new int[0]);
     }
 
     /** axis=-1 automatic selection, 0 X, 1 Y, 2 Z. */
     public static Result analyze(List<VibrationSample> data, int minRpm, int maxRpm, int axis) {
         if (data == null || data.size() < MIN_SAMPLES) {
-            return invalid("正在采集数据，请保持压缩机稳定运行约 5 秒。", 0, 0);
+            double elapsed = 0, preliminaryFs = 0;
+            if (data != null && data.size() >= 2) {
+                elapsed = (data.get(data.size() - 1).timestampNs - data.get(0).timestampNs) * 1e-9;
+                if (elapsed > 0) preliminaryFs = (data.size() - 1) / elapsed;
+            }
+            return invalid("正在采集数据，请保持压缩机稳定运行约 5 秒。", preliminaryFs, elapsed);
         }
         if (minRpm < 60 || maxRpm <= minRpm || maxRpm > 30000) {
             return invalid("转速范围配置不正确。", 0, 0);
@@ -112,82 +127,84 @@ public final class RpmAnalyzer {
         }
 
         int fftN = 1;
-        while (fftN < uniformCount * 2) fftN <<= 1; // Zero padding aids peak interpolation, not physical resolution.
+        while (fftN < uniformCount * 2) fftN <<= 1; // Zero padding only interpolates FFT peaks.
         AxisResult best = null;
+        // Search 1x through possible 3x frequencies. The candidate MUST be the
+        // greatest valid peak (m/s²) across the selected sensor axes, not the
+        // frequency with the best harmonic-comb score.
+        double scanUpperHz = Math.min(maxRpm / 60.0 * 3.0, fs * 0.47);
         for (int c = 0; c < 3; c++) {
             if (axis >= 0 && c != axis) continue;
-            AxisResult r = analyzeAxis(c, signal[c], fftN, fs, duration, minHz, maxHz);
-            if (best == null || r.score > best.score) best = r;
+            AxisResult r = analyzeAxis(c, signal[c], fftN, fs, minHz, scanUpperHz);
+            if (r.peak != null && (best == null || r.peak.value > best.peak.value)) best = r;
         }
-        if (best == null || best.peak == null) {
-            return invalid("未发现足够明显的周期振动峰；尝试切换 X/Y/Z 轴或改善振动耦合。", fs, duration);
+        if (best == null) {
+            return invalid("未发现足够明显的周期振动峰；请检查转速范围、测量轴和振动耦合。", fs, duration);
         }
-        Peak candidate = best.peak;
-        double peakRatio = Math.max(best.peakMainAmp / best.noiseAmp, 1.0);
-        double snr = 20 * Math.log10(peakRatio);
-        boolean fundamentalSeen = best.amp1 > best.noiseAmp * 3.5;
-        int count = 0;
+
+        Peak dominant = best.peak;
+        double snr = 20.0 * Math.log10(Math.max(dominant.value / best.noiseAmp, 1.0));
+        List<Double> plausible = new ArrayList<>();
+        List<Integer> orders = new ArrayList<>();
+        for (int order = 1; order <= 3; order++) {
+            double r = dominant.freq * 60.0 / order;
+            if (r >= minRpm && r <= maxRpm) {
+                plausible.add(r);
+                orders.add(order);
+            }
+        }
+        if (plausible.isEmpty()) {
+            return invalid("最大有效谱峰无法在所设转速范围内按 1×～3× 解释。", fs, duration);
+        }
+        // First valid interpretation is the primary estimate (1x preferred,
+        // then 2x, then 3x). Keep all other valid interpretations visible.
+        int primaryOrder = orders.get(0);
+        double rpm = plausible.get(0);
+        double estimatedHz = rpm / 60.0;
+        double[] possibleRpm = new double[plausible.size()];
+        int[] possibleOrders = new int[orders.size()];
+        for (int i = 0; i < plausible.size(); i++) {
+            possibleRpm[i] = plausible.get(i);
+            possibleOrders[i] = orders.get(i);
+        }
+
+        // Harmonic support describes spectral periodicity, not unique shaft speed.
+        int observedHarmonics = 0;
         int accessible = 0;
         for (int h = 1; h <= 3; h++) {
-            if (candidate.freq * h >= fs * 0.47) continue;
+            double f = estimatedHz * h;
+            if (f >= fs * 0.47) continue;
             accessible++;
-            if (peakAmplitude(best.amplitudes, candidate.freq * h, fftN / fs, fs) > best.noiseAmp * 3.5) count++;
+            if (peakAmplitude(best.amplitudes, f, fftN / (double) fs, fs) >= best.noiseAmp * 3.5)
+                observedHarmonics++;
         }
-
-        // Refine frequency with the strongest verified harmonic's parabolic peak,
-        // but require at least some 1x evidence before making a high-confidence claim.
-        double weightedHz = 0, weightTotal = 0;
-        for (int h = 1; h <= 3; h++) {
-            double hz = candidate.freq * h;
-            if (hz >= fs * 0.47) continue;
-            int k = findPeakIndex(best.amplitudes, hz * fftN / fs, 2);
-            double amp = best.amplitudes[k];
-            if (amp < best.noiseAmp * 3.5) continue;
-            double refined = interpolatePeakFrequency(best.amplitudes, k, fs / fftN) / h;
-            double weight = Math.sqrt(amp / best.noiseAmp) / h;
-            weightedHz += refined * weight;
-            weightTotal += weight;
-        }
-        double estimatedHz = weightTotal > 0 ? weightedHz / weightTotal : candidate.freq;
-        double rpm = estimatedHz * 60.0;
-        if (rpm < minRpm * 0.97 || rpm > maxRpm * 1.03) {
-            return invalid("候选转频超出所选范围，请检查转速上下限。", fs, duration);
-        }
-        String confidence;
-        if (snr >= 14 && count >= 2 && fundamentalSeen && accessible >= 2) confidence = "较高";
-        else if (snr >= 9 && count >= 2 && fundamentalSeen) confidence = "中等";
-        else confidence = "较低";
-
-        String note = "曲轴转频为基于振动谱的估计值，尚未经转速基准校准。";
-        if (count < 2) note = "仅检测到单个明显谱峰，存在将 2×/3× 倍频误判为转频的风险。";
-        else if (!fundamentalSeen) note = "一阶转频不明显，无法排除倍频误判。";
-        else if (accessible < 2) note = "采样率不足以观察二阶谐波，估计值需与基准转速核对。";
-        if (fs * 0.45 < maxRpm / 60.0) {
-            note += " 当前采样率不足以覆盖整个设定转速上限，存在混叠风险。";
+        String confidence = snr >= 14 && observedHarmonics >= 2 && accessible >= 2
+                ? "较高" : snr >= 9 ? "中等" : "较低";
+        String note = "主峰优先估算；峰值阶次尚未由外部转速基准验证。";
+        if (primaryOrder != 1) {
+            note += " 主峰高于转速搜索上限，首选按 " + primaryOrder + "× 阶次折算。";
             confidence = "较低";
-        } else if (fs < (maxRpm / 60.0) * 2.5) {
-            note += " 高频段接近奈奎斯特频率，可能发生倍频混叠；请缩小转速范围校验。";
+        }
+        if (plausible.size() > 1) {
+            note += " 主峰也可能来自其它阶次，请核对下方候选转速。";
             if (confidence.equals("较高")) confidence = "中等";
         }
-        // An apparent 1x/2x/3x harmonic comb can itself be aliasing from a
-        // faster shaft (example: 75 Hz sampled at 200 Hz, aliases at 25/50/75).
-        // Never claim high confidence for such an ambiguous pattern.
-        double firstAmp = peakAmplitude(best.amplitudes, candidate.freq, fftN / fs, fs);
-        double thirdAmp = peakAmplitude(best.amplitudes, candidate.freq * 3.0, fftN / fs, fs);
-        boolean foldAmbiguity = candidate.freq * 3.0 <= maxHz &&
-                fs < 6.0 * maxHz && thirdAmp > firstAmp * 1.15;
-        if (foldAmbiguity) {
+        if (accessible < 2 || fs < (maxRpm / 60.0) * 2.5) {
+            note += " 采样率偏低，高阶峰可能混叠；请用较窄转速范围复核。";
+            if (confidence.equals("较高")) confidence = "中等";
+        }
+        if (fs * 0.47 < maxRpm / 60.0) {
+            note += " 设定转速上限已超出可靠采集频带。";
             confidence = "较低";
-            note += " 三阶谱峰强于候选一阶，可能是更高转速振动分量混叠成的假谐波组。";
         }
         if (best.rms < 0.025) {
-            note += " 有效振动幅值偏小，建议改善固定和耦合。";
+            note += " 振动有效幅值较小，建议改善手机与测试台的振动耦合。";
             if (confidence.equals("较高")) confidence = "中等";
         }
 
-        int plotEnd = Math.min(fftN / 2 - 1, (int)Math.ceil(Math.min(fs * 0.49, maxRpm / 60.0 * 3) * fftN / fs));
+        int plotEnd = Math.min(fftN / 2 - 1,
+                (int)Math.ceil(Math.min(fs * 0.49, maxRpm / 60.0 * 3) * fftN / fs));
         int plotStart = Math.max(1, (int)Math.floor(Math.max(2, minHz * 0.5) * fftN / fs));
-        // Keep chart lightweight by decimating when needed.
         int step = Math.max(1, (plotEnd - plotStart) / 400);
         List<Double> x = new ArrayList<>(), y = new ArrayList<>();
         for (int k = plotStart; k <= plotEnd; k += step) {
@@ -198,7 +215,8 @@ public final class RpmAnalyzer {
         for (int i = 0; i < x.size(); i++) { fx[i] = x.get(i); sy[i] = y.get(i); }
         return new Result(true, rpm, estimatedHz, fs, 1.0 / duration,
                 best.rms, snr, confidence, note, "XYZ".substring(best.axis, best.axis + 1),
-                fx, sy, count, duration);
+                fx, sy, observedHarmonics, duration, dominant.freq, primaryOrder,
+                possibleRpm, possibleOrders);
     }
 
     private static class Peak {
@@ -210,23 +228,19 @@ public final class RpmAnalyzer {
     private static class AxisResult {
         final int axis;
         final double[] amplitudes;
-        final double noiseAmp, rms, score, amp1, peakMainAmp;
+        final double noiseAmp, rms;
         final Peak peak;
-        AxisResult(int axis, double[] amps, double noiseAmp, double rms,
-                double score, double amp1, double peakMainAmp, Peak peak) {
+        AxisResult(int axis, double[] amps, double noiseAmp, double rms, Peak peak) {
             this.axis = axis;
             this.amplitudes = amps;
             this.noiseAmp = noiseAmp;
             this.rms = rms;
-            this.score = score;
-            this.amp1 = amp1;
-            this.peakMainAmp = peakMainAmp;
             this.peak = peak;
         }
     }
 
     private static AxisResult analyzeAxis(int axis, double[] values, int fftN, double fs,
-            double duration, double minHz, double maxHz) {
+            double minHz, double scanUpperHz) {
         int n = values.length;
         double mean = 0;
         for (double v : values) mean += v;
@@ -245,49 +259,17 @@ public final class RpmAnalyzer {
         for (int i = 1; i < amps.length; i++) amps[i] = 2.0 * Math.hypot(re[i], im[i]) / windowSum;
         double noise = medianNoise(amps, fs / fftN, Math.max(3, minHz / 2));
         int kLow = Math.max(2, (int)Math.ceil(minHz * fftN / fs));
-        int kHigh = Math.min(amps.length - 3, (int)Math.floor(maxHz * fftN / fs));
-        if (kHigh <= kLow) return new AxisResult(axis, amps, noise, Math.sqrt(rmsSum/n), -1, 0, 0, null);
-
-        List<Peak> candidates = new ArrayList<>();
-        for (int k = Math.max(2, (int)(minHz * fftN / fs)); k < amps.length - 2; k++) {
-            if (amps[k] < noise * 3 || amps[k] < amps[k - 1] || amps[k] <= amps[k + 1]) continue;
-            double peakFreq = interpolatePeakFrequency(amps, k, fs / fftN);
-            if (peakFreq >= fs * 0.47) continue;
-            for (int h = 1; h <= 3; h++) {
-                double base = peakFreq / h;
-                if (base >= minHz && base <= maxHz) candidates.add(new Peak(base, amps[k]));
-            }
+        int kHigh = Math.min(amps.length - 3, (int)Math.floor(scanUpperHz * fftN / fs));
+        Peak maximum = null;
+        for (int k = kLow; k <= kHigh; k++) {
+            if (amps[k] < noise * 3.5 || amps[k] < amps[k - 1] || amps[k] <= amps[k + 1])
+                continue;
+            double refinedHz = interpolatePeakFrequency(amps, k, fs / fftN);
+            if (refinedHz < minHz || refinedHz > scanUpperHz) continue;
+            if (maximum == null || amps[k] > maximum.value)
+                maximum = new Peak(refinedHz, amps[k]);
         }
-        Peak best = null;
-        double bestScore = -1, bestAmp1 = 0, bestMain = 0;
-        for (Peak p : candidates) {
-            double[] weights = {1.0, 0.78, 0.48, 0.24};
-            double score = 0, amp1 = 0, main = 0;
-            int supports = 0;
-            for (int h = 1; h <= 4; h++) {
-                double freq = p.freq * h;
-                if (freq >= fs * 0.47) continue;
-                double amp = peakAmplitude(amps, freq, fftN / fs, fs);
-                if (h == 1) amp1 = amp;
-                main = Math.max(main, amp);
-                double ratio = amp / noise;
-                if (ratio >= 3.5) {
-                    supports++;
-                    score += weights[h - 1] * Math.log1p(ratio);
-                }
-            }
-            // Reward candidates supported by multiple harmonic lines, not by a single isolated peak.
-            score += Math.max(0, supports - 1) * 0.9;
-            if (amp1 < noise * 3.5) score -= 0.8;
-            if (score > bestScore) {
-                best = p;
-                bestScore = score;
-                bestAmp1 = amp1;
-                bestMain = main;
-            }
-        }
-        return new AxisResult(axis, amps, noise, Math.sqrt(rmsSum / n), bestScore,
-                bestAmp1, bestMain, best);
+        return new AxisResult(axis, amps, noise, Math.sqrt(rmsSum / n), maximum);
     }
 
     private static double peakAmplitude(double[] amps, double hz, double binsPerHz, double fs) {

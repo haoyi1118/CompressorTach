@@ -22,7 +22,14 @@ public final class SpectrumView extends View {
     public void show(RpmAnalyzer.Result result) {
         freq = result.spectrumHz;
         db = result.spectrumDb;
-        markerHz = result.fundamentalHz;
+        markerHz = result.dominantPeakHz;
+        invalidate();
+    }
+
+    public void clear() {
+        freq = new double[0];
+        db = new double[0];
+        markerHz = Double.NaN;
         invalidate();
     }
 
@@ -82,7 +89,7 @@ public final class SpectrumView extends View {
             paint.setStrokeWidth(dp(1));
             canvas.drawLine(x, top, x, bottom, paint);
             paint.setStyle(Paint.Style.FILL);
-            canvas.drawText(String.format(Locale.US,"1× %.1f Hz",markerHz),
+            canvas.drawText(String.format(Locale.US,"主峰 %.1f Hz",markerHz),
                     Math.min(x + dp(4), right - dp(76)), top + dp(12), paint);
         }
     }

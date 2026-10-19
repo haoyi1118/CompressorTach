@@ -49,6 +49,7 @@ public final class MainActivity extends Activity {
     private boolean running;
     private int minRpm = 900, maxRpm = 4800, selectedAxis = -1;
     private TextView rpmView, confidenceView, detailView, noteView, statusView, sensorView;
+    private TextView samplingView, alternativesView;
     private EditText minInput, maxInput;
     private Spinner axisSpinner;
     private Button runButton, exportButton;
@@ -106,7 +107,7 @@ public final class MainActivity extends Activity {
         TextView title = label("压缩机振动转速仪", 27, WHITE, true);
         title.setPadding(0, dp(7), 0, dp(4));
         root.addView(title);
-        TextView subtitle = label("单缸往复式压缩机 · 三轴加速度 · FFT 谐波估算", 12, SECONDARY, false);
+        TextView subtitle = label("单缸往复式压缩机 · 三轴加速度 · 最大谱峰优先", 12, SECONDARY, false);
         root.addView(subtitle);
 
         LinearLayout rpmCard = card();
@@ -127,7 +128,23 @@ public final class MainActivity extends Activity {
         rpmCard.addView(confidenceView);
         statusView = label("尚未开始测量", 13, SECONDARY, false);
         rpmCard.addView(statusView);
+        samplingView = label("实际采样率：等待采集", 12, GREEN, false);
+        samplingView.setPadding(0, dp(9), 0, 0);
+        rpmCard.addView(samplingView);
+        alternativesView = label("其他可能转速：等待频谱分析", 12, AMBER, false);
+        alternativesView.setPadding(0, dp(8), 0, 0);
+        rpmCard.addView(alternativesView);
 
+        LinearLayout spectrumCard = card();
+        root.addView(spectrumCard, margins(0, dp(14)));
+        spectrumCard.addView(label("实时频谱", 15, WHITE, true));
+        chart = new SpectrumView(this);
+        spectrumCard.addView(chart, new LinearLayout.LayoutParams(-1, dp(235)));
+        detailView = label("频率分辨率 / 选中轴 / RMS", 12, SECONDARY, false);
+        spectrumCard.addView(detailView);
+        noteView = label("结果基于 5 秒振动信号，每约 1 秒更新。请将手机可靠固定在静止、隔热的测试支架上；勿把手机直接贴在高温压缩机壳体或运动部件上。", 12, AMBER, false);
+        noteView.setPadding(0, dp(12), 0, 0);
+        spectrumCard.addView(noteView);
         LinearLayout cfg = card();
         root.addView(cfg, margins(0, dp(14)));
         cfg.addView(label("测量设置", 15, WHITE, true));
@@ -174,16 +191,6 @@ public final class MainActivity extends Activity {
         buttons.addView(exportButton, new LinearLayout.LayoutParams(0, dp(52), 1));
         exportButton.setOnClickListener(v -> exportCsv());
 
-        LinearLayout spectrumCard = card();
-        root.addView(spectrumCard, margins(0, dp(2)));
-        spectrumCard.addView(label("实时频谱", 15, WHITE, true));
-        chart = new SpectrumView(this);
-        spectrumCard.addView(chart, new LinearLayout.LayoutParams(-1, dp(235)));
-        detailView = label("实际采样率 / 频率分辨率 / 选中轴 / RMS", 12, SECONDARY, false);
-        spectrumCard.addView(detailView);
-        noteView = label("结果基于 5 秒振动信号，每约 1 秒更新。请将手机可靠固定在静止、隔热的测试支架上；勿把手机直接贴在高温压缩机壳体或运动部件上。", 12, AMBER, false);
-        noteView.setPadding(0, dp(12), 0, 0);
-        spectrumCard.addView(noteView);
         TextView foot = label("离线运行 · 不使用麦克风/网络 · 不保证计量级精度", 11, SECONDARY, false);
         foot.setGravity(Gravity.CENTER);
         root.addView(foot, margins(0, dp(15)));
@@ -200,9 +207,14 @@ public final class MainActivity extends Activity {
         selectedAxis = axisSpinner.getSelectedItemPosition() - 1;
         if (!recorder.start()) { toast("无法启动加速度传感器"); return; }
         running = true;
+        lastResult = null;
         rpmView.setText("—");
         statusView.setText("正在采集 5 秒振动数据…");
         confidenceView.setText("可信度：等待数据");
+        samplingView.setText("实际采样率：采集中…");
+        alternativesView.setText("其他可能转速：等待频谱分析");
+        chart.clear();
+        detailView.setText("频率分辨率 / 选中轴 / RMS");
         minInput.setEnabled(false);
         maxInput.setEnabled(false);
         axisSpinner.setEnabled(false);
@@ -225,23 +237,41 @@ public final class MainActivity extends Activity {
 
     private void render(RpmAnalyzer.Result result) {
         lastResult = result;
+        samplingView.setText(result.sampleRateHz > 0
+                ? String.format(Locale.US, "实际采样率：%.1f Hz", result.sampleRateHz)
+                : "实际采样率：等待数据");
         if (result.valid) {
             rpmView.setText(String.format(Locale.US, "%.0f", result.rpm));
-            confidenceView.setText("可信度：" + result.confidence + "  |  检出谐波 " + result.supportedHarmonics + " 条");
+            confidenceView.setText("可信度：" + result.confidence
+                    + "  |  检出相关谱线 " + result.supportedHarmonics + " 条");
             confidenceView.setTextColor(result.confidence.equals("较高") ? GREEN : AMBER);
-            statusView.setText(String.format(Locale.US,"候选一阶转频 %.2f Hz",result.fundamentalHz));
+            statusView.setText(String.format(Locale.US,
+                    "最大峰值 %.2f Hz  ·  按 %d× 换算",
+                    result.dominantPeakHz, result.primaryOrder));
+            if (result.possibleRpm.length <= 1) {
+                alternativesView.setText("其他可能转速：当前范围内无其它 1×～3× 解释");
+            } else {
+                StringBuilder b = new StringBuilder("其他可能转速（同一主峰的阶次解释）：");
+                for (int i = 1; i < result.possibleRpm.length; i++) {
+                    b.append(String.format(Locale.US, "\n%d× 对应 %.0f RPM",
+                            result.possibleOrders[i], result.possibleRpm[i]));
+                }
+                alternativesView.setText(b.toString());
+            }
             detailView.setText(String.format(Locale.US,
-                    "采样率 %.1f Hz  ·  真实频率分辨率约 %.2f Hz\n分析轴 %s  ·  振动 RMS %.4f m/s²  ·  峰值 SNR %.1f dB",
-                    result.sampleRateHz, result.resolutionHz, result.axisLabel,
-                    result.rmsMs2, result.snrDb));
+                    "真实频率分辨率约 %.2f Hz  ·  分析轴 %s\n振动 RMS %.4f m/s²  ·  主峰 SNR %.1f dB",
+                    result.resolutionHz, result.axisLabel, result.rmsMs2, result.snrDb));
             chart.show(result);
         } else {
             rpmView.setText("—");
             confidenceView.setText("可信度：不足");
+            confidenceView.setTextColor(AMBER);
             statusView.setText(result.note);
-            detailView.setText(result.sampleRateHz > 0 ? String.format(Locale.US,
-                    "实测采样率约 %.1f Hz  ·  数据时长 %.1f 秒",result.sampleRateHz,result.durationSeconds)
+            alternativesView.setText("其他可能转速：等待有效谱峰");
+            detailView.setText(result.sampleRateHz > 0
+                    ? String.format(Locale.US, "已采集 %.1f 秒数据", result.durationSeconds)
                     : "等待传感器数据");
+            chart.clear();
         }
         noteView.setText(result.note);
     }
@@ -270,8 +300,9 @@ public final class MainActivity extends Activity {
                 writer.write("# CompressorTach vibration capture; timestamps are monotonic, not wall-clock time\n");
                 writer.write("# units: t_s, ax_m_s2, ay_m_s2, az_m_s2\n");
                 if (analyzed != null && analyzed.valid) {
-                    writer.write(String.format(Locale.US,"# estimated_rpm=%.3f; confidence=%s; fs_Hz=%.2f; axis=%s\n",
-                            analyzed.rpm, analyzed.confidence, analyzed.sampleRateHz, analyzed.axisLabel));
+                    writer.write(String.format(Locale.US,"# estimated_rpm=%.3f; confidence=%s; fs_Hz=%.2f; axis=%s; dominant_Hz=%.3f; dominant_order=%d\n",
+                            analyzed.rpm, analyzed.confidence, analyzed.sampleRateHz,
+                            analyzed.axisLabel, analyzed.dominantPeakHz, analyzed.primaryOrder));
                 }
                 writer.write("t_s,ax_m_s2,ay_m_s2,az_m_s2\n");
                 long zero = snapshot.get(0).timestampNs;
