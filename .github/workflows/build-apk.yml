@@ -46,5 +46,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CompressorTach-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            install-clean.ps1
+            install-clean.bat
           if-no-files-found: error

@@ -1,10 +1,13 @@
 package com.compwave.tach;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.SharedPreferences;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.text.TextUtils;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -48,11 +51,9 @@ public final class MainActivity extends Activity {
     private SensorRecorder recorder;
     private boolean running;
     private int minRpm = 900, maxRpm = 4800, selectedAxis = -1;
-    private TextView rpmView, confidenceView, detailView, noteView, statusView, sensorView;
+    private TextView rpmView, confidenceView, detailView, statusView;
     private TextView samplingView, alternativesView;
-    private EditText minInput, maxInput;
-    private Spinner axisSpinner;
-    private Button runButton, exportButton;
+    private Button runButton, exportButton, settingsButton;
     private SpectrumView chart;
     private RpmAnalyzer.Result lastResult;
     private final Runnable refresh = new Runnable() {
@@ -84,9 +85,14 @@ public final class MainActivity extends Activity {
         getWindow().setStatusBarColor(NAVY);
         getWindow().setNavigationBarColor(NAVY);
         recorder = new SensorRecorder(this);
+        SharedPreferences prefs = getSharedPreferences("measurement", MODE_PRIVATE);
+        minRpm = prefs.getInt("minRpm", 900);
+        maxRpm = prefs.getInt("maxRpm", 4800);
+        selectedAxis = prefs.getInt("axis", -1);
+        if (minRpm < 60 || maxRpm > 30000 || maxRpm <= minRpm || selectedAxis < -1 || selectedAxis > 2) {
+            minRpm = 900; maxRpm = 4800; selectedAxis = -1;
+        }
         buildUi();
-        sensorView.setText(recorder.sensorName() + "  |  标称最快约 " +
-                String.format(Locale.US,"%.0f Hz",recorder.nominalMaxHz()));
         if (!recorder.available()) {
             statusView.setText("此手机没有可用加速度计");
             runButton.setEnabled(false);
@@ -97,127 +103,192 @@ public final class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(NAVY);
+        scroll.setVerticalScrollBarEnabled(false);
         LinearLayout root = vertical();
-        root.setPadding(dp(18), dp(22), dp(18), dp(34));
+        root.setPadding(dp(13), dp(8), dp(13), dp(8));
         scroll.addView(root);
         setContentView(scroll);
 
-        TextView eyebrow = label("COMPRESSOR  /  NVH TOOL", 11, GREEN, true);
-        root.addView(eyebrow);
-        TextView title = label("压缩机振动转速仪", 27, WHITE, true);
-        title.setPadding(0, dp(7), 0, dp(4));
-        root.addView(title);
-        TextView subtitle = label("单缸往复式压缩机 · 三轴加速度 · 最大谱峰优先", 12, SECONDARY, false);
-        root.addView(subtitle);
+        // One-line title / upper-right settings gear. No in-page settings panel.
+        LinearLayout header = horizontal();
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(header);
+        LinearLayout branding = vertical();
+        header.addView(branding, new LinearLayout.LayoutParams(0, -2, 1));
+        branding.addView(label("压缩机振动转速仪", 20, WHITE, true));
+        TextView tagline = label("CompressorTach  ·  三轴加速度  ·  V0.3", 10, SECONDARY, false);
+        tagline.setPadding(0, dp(2), 0, 0);
+        branding.addView(tagline);
+        settingsButton = new Button(this);
+        settingsButton.setText("⚙");
+        settingsButton.setTextSize(24);
+        settingsButton.setAllCaps(false);
+        settingsButton.setTextColor(WHITE);
+        settingsButton.setContentDescription("测量设置");
+        settingsButton.setPadding(0, 0, 0, 0);
+        settingsButton.setMinHeight(0);
+        settingsButton.setMinimumHeight(0);
+        settingsButton.setMinWidth(0);
+        settingsButton.setMinimumWidth(0);
+        settingsButton.setBackground(round(Color.rgb(35, 57, 78), 12));
+        header.addView(settingsButton, new LinearLayout.LayoutParams(dp(46), dp(46)));
+        settingsButton.setOnClickListener(v -> openSettings());
 
-        LinearLayout rpmCard = card();
-        LinearLayout.LayoutParams cardParam = margins(dp(0),dp(18));
-        root.addView(rpmCard, cardParam);
-        rpmCard.addView(label("估算曲轴转速", 13, SECONDARY, false));
+        LinearLayout rpmCard = compactCard();
+        root.addView(rpmCard, margins(0, dp(7)));
+        LinearLayout rpmHeading = horizontal();
+        rpmHeading.setGravity(Gravity.CENTER_VERTICAL);
+        rpmCard.addView(rpmHeading);
+        rpmHeading.addView(label("估算曲轴转速", 13, SECONDARY, false),
+                new LinearLayout.LayoutParams(0, -2, 1));
+        samplingView = label("采样率：等待", 11, GREEN, false);
+        samplingView.setGravity(Gravity.END);
+        rpmHeading.addView(samplingView);
+
         LinearLayout numberLine = horizontal();
         numberLine.setGravity(Gravity.BOTTOM);
         rpmCard.addView(numberLine);
-        rpmView = label("—", 60, WHITE, true);
+        rpmView = label("—", 46, WHITE, true);
         rpmView.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        rpmView.setIncludeFontPadding(false);
         numberLine.addView(rpmView);
-        TextView unit = label("RPM", 15, GREEN, true);
-        unit.setPadding(dp(9), 0, 0, dp(11));
+        TextView unit = label("RPM", 14, GREEN, true);
+        unit.setPadding(dp(7), 0, 0, dp(7));
         numberLine.addView(unit);
-        confidenceView = label("可信度：等待数据", 12, AMBER, false);
-        confidenceView.setPadding(0, dp(6), 0, dp(10));
-        rpmCard.addView(confidenceView);
-        statusView = label("尚未开始测量", 13, SECONDARY, false);
+
+        statusView = label("尚未开始测量", 12, SECONDARY, false);
+        statusView.setMaxLines(2);
+        statusView.setEllipsize(TextUtils.TruncateAt.END);
         rpmCard.addView(statusView);
-        samplingView = label("实际采样率：等待采集", 12, GREEN, false);
-        samplingView.setPadding(0, dp(9), 0, 0);
-        rpmCard.addView(samplingView);
-        alternativesView = label("其他可能转速：等待频谱分析", 12, AMBER, false);
-        alternativesView.setPadding(0, dp(8), 0, 0);
+        confidenceView = label("可信度：等待数据", 11, AMBER, false);
+        confidenceView.setPadding(0, dp(2), 0, 0);
+        rpmCard.addView(confidenceView);
+        alternativesView = label("潜在转速：等待分析", 11, AMBER, false);
+        alternativesView.setPadding(0, dp(3), 0, 0);
+        alternativesView.setMaxLines(2);
+        alternativesView.setEllipsize(TextUtils.TruncateAt.END);
         rpmCard.addView(alternativesView);
 
-        LinearLayout spectrumCard = card();
-        root.addView(spectrumCard, margins(0, dp(14)));
-        spectrumCard.addView(label("实时频谱", 15, WHITE, true));
+        // Compact chart and diagnostic line; buttons immediately follow the chart.
+        LinearLayout spectrumCard = compactCard();
+        root.addView(spectrumCard, margins(0, dp(7)));
+        spectrumCard.addView(label("实时频谱", 14, WHITE, true));
         chart = new SpectrumView(this);
-        spectrumCard.addView(chart, new LinearLayout.LayoutParams(-1, dp(235)));
-        detailView = label("频率分辨率 / 选中轴 / RMS", 12, SECONDARY, false);
+        int availableDp = Math.round(getResources().getDisplayMetrics().heightPixels /
+                getResources().getDisplayMetrics().density);
+        int chartDp = Math.max(136, Math.min(208, Math.round(availableDp * 0.225f)));
+        spectrumCard.addView(chart, new LinearLayout.LayoutParams(-1, dp(chartDp)));
+        detailView = label("频率分辨率 / 分析轴 / 振动 RMS", 11, SECONDARY, false);
+        detailView.setMaxLines(2);
         spectrumCard.addView(detailView);
-        noteView = label("结果基于 5 秒振动信号，每约 1 秒更新。请将手机可靠固定在静止、隔热的测试支架上；勿把手机直接贴在高温压缩机壳体或运动部件上。", 12, AMBER, false);
-        noteView.setPadding(0, dp(12), 0, 0);
-        spectrumCard.addView(noteView);
-        LinearLayout cfg = card();
-        root.addView(cfg, margins(0, dp(14)));
-        cfg.addView(label("测量设置", 15, WHITE, true));
-        LinearLayout ranges = horizontal();
-        ranges.setPadding(0, dp(8), 0, dp(5));
-        cfg.addView(ranges);
-        LinearLayout lo = vertical(), hi = vertical();
-        ranges.addView(lo,new LinearLayout.LayoutParams(0, -2,1));
-        ranges.addView(hi,new LinearLayout.LayoutParams(0, -2,1));
-        lo.addView(label("最低转速  rpm", 11, SECONDARY, false));
-        hi.addView(label("最高转速  rpm", 11, SECONDARY, false));
-        minInput = edit("900"); maxInput = edit("4800");
-        lo.addView(minInput); hi.addView(maxInput);
-        cfg.addView(label("分析轴", 11, SECONDARY, false));
-        axisSpinner = new Spinner(this);
-        String[] names = {"自动选择有效振动轴", "X 轴", "Y 轴", "Z 轴"};
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names);
-        axisSpinner.setAdapter(adapter);
-        axisSpinner.setBackgroundColor(Color.rgb(41, 62, 84));
-        cfg.addView(axisSpinner);
-        sensorView = label("读取传感器…", 11, SECONDARY, false);
-        sensorView.setPadding(0, dp(13), 0, 0);
-        cfg.addView(sensorView);
 
         LinearLayout buttons = horizontal();
-        buttons.setPadding(0, dp(12), 0, dp(12));
+        buttons.setPadding(0, dp(8), 0, 0);
         root.addView(buttons);
         runButton = new Button(this);
         runButton.setText("开始测量");
         runButton.setAllCaps(false);
+        runButton.setTextSize(15);
         runButton.setTextColor(NAVY);
+        runButton.setPadding(0, 0, 0, 0);
         runButton.setBackground(round(GREEN, 12));
-        LinearLayout.LayoutParams grow = new LinearLayout.LayoutParams(0, dp(52), 1.6f);
-        grow.setMargins(0, 0, dp(9), 0);
+        LinearLayout.LayoutParams grow = new LinearLayout.LayoutParams(0, dp(48), 1.5f);
+        grow.setMargins(0, 0, dp(8), 0);
         buttons.addView(runButton, grow);
         runButton.setOnClickListener(v -> { if (running) stopMeasure(); else startMeasure(); });
 
         exportButton = new Button(this);
         exportButton.setText("导出 CSV");
         exportButton.setAllCaps(false);
+        exportButton.setTextSize(15);
+        exportButton.setPadding(0, 0, 0, 0);
         exportButton.setTextColor(WHITE);
         exportButton.setBackground(round(Color.rgb(39, 65, 89), 12));
         exportButton.setEnabled(false);
-        buttons.addView(exportButton, new LinearLayout.LayoutParams(0, dp(52), 1));
+        buttons.addView(exportButton, new LinearLayout.LayoutParams(0, dp(48), 1));
         exportButton.setOnClickListener(v -> exportCsv());
+    }
 
-        TextView foot = label("离线运行 · 不使用麦克风/网络 · 不保证计量级精度", 11, SECONDARY, false);
-        foot.setGravity(Gravity.CENTER);
-        root.addView(foot, margins(0, dp(15)));
+    /** Settings are applied when a new measurement starts; no hidden in-measure changes. */
+    private void openSettings() {
+        LinearLayout body = vertical();
+        body.setPadding(dp(18), dp(8), dp(18), dp(3));
+        body.addView(label("搜索转速范围（RPM）", 13, WHITE, true));
+        LinearLayout ranges = horizontal();
+        ranges.setPadding(0, dp(5), 0, dp(9));
+        body.addView(ranges);
+        LinearLayout left = vertical(), right = vertical();
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
+        lp.setMargins(0, 0, dp(10), 0);
+        ranges.addView(left, lp);
+        ranges.addView(right, new LinearLayout.LayoutParams(0, -2, 1));
+        left.addView(label("最低转速", 11, SECONDARY, false));
+        right.addView(label("最高转速", 11, SECONDARY, false));
+        EditText minField = edit(String.valueOf(minRpm));
+        EditText maxField = edit(String.valueOf(maxRpm));
+        left.addView(minField);
+        right.addView(maxField);
+        body.addView(label("分析轴", 12, WHITE, true));
+        Spinner axisField = new Spinner(this);
+        String[] axes = {"自动选择有效振动轴", "X 轴", "Y 轴", "Z 轴"};
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_dropdown_item, axes);
+        axisField.setAdapter(adapter);
+        axisField.setSelection(selectedAxis + 1);
+        body.addView(axisField);
+        TextView sensorInfo = label(recorder.sensorName() + "  |  标称上限约 " +
+                String.format(Locale.US, "%.0f Hz", recorder.nominalMaxHz()),
+                11, SECONDARY, false);
+        sensorInfo.setPadding(0, dp(10), 0, 0);
+        body.addView(sensorInfo);
+        TextView tip = label("手机须固定在静止、隔热的试验支架上；不得直接接触高温压缩机壳体。实际采样率以测量卡片显示为准。", 11, AMBER, false);
+        tip.setPadding(0, dp(12), 0, 0);
+        body.addView(tip);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("测量设置")
+                .setView(body)
+                .setNegativeButton("取消", (d, w) -> {})
+                .setPositiveButton("保存", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    int low, high;
+                    try {
+                        low = Integer.parseInt(minField.getText().toString().trim());
+                        high = Integer.parseInt(maxField.getText().toString().trim());
+                    } catch (NumberFormatException ex) {
+                        toast("请输入有效整数转速"); return;
+                    }
+                    if (low < 60 || high > 30000 || high <= low) {
+                        toast("最低 ≥60，最高 ≤30000，且最高必须大于最低"); return;
+                    }
+                    if (running) stopMeasure();
+                    minRpm = low;
+                    maxRpm = high;
+                    selectedAxis = axisField.getSelectedItemPosition() - 1;
+                    getSharedPreferences("measurement", MODE_PRIVATE).edit()
+                            .putInt("minRpm", minRpm)
+                            .putInt("maxRpm", maxRpm)
+                            .putInt("axis", selectedAxis)
+                            .apply();
+                    toast("设置已保存，下一次测量生效");
+                    dialog.dismiss();
+                }));
+        dialog.show();
     }
 
     private void startMeasure() {
-        try {
-            minRpm = Integer.parseInt(minInput.getText().toString().trim());
-            maxRpm = Integer.parseInt(maxInput.getText().toString().trim());
-        } catch (NumberFormatException e) { toast("请输入有效的整数转速范围"); return; }
-        if (minRpm < 60 || maxRpm > 30000 || maxRpm <= minRpm) {
-            toast("转速范围错误：下限 ≥60，上限 ≤30000 且大于下限"); return;
-        }
-        selectedAxis = axisSpinner.getSelectedItemPosition() - 1;
         if (!recorder.start()) { toast("无法启动加速度传感器"); return; }
         running = true;
         lastResult = null;
         rpmView.setText("—");
         statusView.setText("正在采集 5 秒振动数据…");
         confidenceView.setText("可信度：等待数据");
-        samplingView.setText("实际采样率：采集中…");
-        alternativesView.setText("其他可能转速：等待频谱分析");
+        samplingView.setText("采样率：采集中…");
+        alternativesView.setText("潜在转速：等待频谱分析");
         chart.clear();
-        detailView.setText("频率分辨率 / 选中轴 / RMS");
-        minInput.setEnabled(false);
-        maxInput.setEnabled(false);
-        axisSpinner.setEnabled(false);
+        detailView.setText("频率分辨率 / 分析轴 / 振动 RMS");
         runButton.setText("停止测量");
         exportButton.setEnabled(true);
         ui.postDelayed(refresh, 1200);
@@ -229,37 +300,35 @@ public final class MainActivity extends Activity {
         recorder.stop();
         ui.removeCallbacks(refresh);
         runButton.setText("重新开始");
-        minInput.setEnabled(true);
-        maxInput.setEnabled(true);
-        axisSpinner.setEnabled(true);
-        statusView.setText("已停止，当前显示上次有效分析结果");
+        statusView.setText("已停止，保留最后一次估算结果");
     }
 
     private void render(RpmAnalyzer.Result result) {
         lastResult = result;
         samplingView.setText(result.sampleRateHz > 0
-                ? String.format(Locale.US, "实际采样率：%.1f Hz", result.sampleRateHz)
-                : "实际采样率：等待数据");
+                ? String.format(Locale.US, "实际采样率 %.1f Hz", result.sampleRateHz)
+                : "采样率：等待数据");
         if (result.valid) {
             rpmView.setText(String.format(Locale.US, "%.0f", result.rpm));
             confidenceView.setText("可信度：" + result.confidence
-                    + "  |  检出相关谱线 " + result.supportedHarmonics + " 条");
+                    + "  ·  相关谱线 " + result.supportedHarmonics + " 条");
             confidenceView.setTextColor(result.confidence.equals("较高") ? GREEN : AMBER);
             statusView.setText(String.format(Locale.US,
                     "最大峰值 %.2f Hz  ·  按 %d× 换算",
                     result.dominantPeakHz, result.primaryOrder));
             if (result.possibleRpm.length <= 1) {
-                alternativesView.setText("其他可能转速：当前范围内无其它 1×～3× 解释");
+                alternativesView.setText("潜在转速：当前范围内无其它阶次解释");
             } else {
-                StringBuilder b = new StringBuilder("其他可能转速（同一主峰的阶次解释）：");
+                StringBuilder b = new StringBuilder("潜在转速：");
                 for (int i = 1; i < result.possibleRpm.length; i++) {
-                    b.append(String.format(Locale.US, "\n%d× 对应 %.0f RPM",
+                    if (i > 1) b.append("  ·  ");
+                    b.append(String.format(Locale.US, "%d× %.0f RPM",
                             result.possibleOrders[i], result.possibleRpm[i]));
                 }
                 alternativesView.setText(b.toString());
             }
             detailView.setText(String.format(Locale.US,
-                    "真实频率分辨率约 %.2f Hz  ·  分析轴 %s\n振动 RMS %.4f m/s²  ·  主峰 SNR %.1f dB",
+                    "Δf ≈ %.2f Hz  ·  轴 %s  ·  RMS %.4f m/s²\n主峰 SNR %.1f dB",
                     result.resolutionHz, result.axisLabel, result.rmsMs2, result.snrDb));
             chart.show(result);
         } else {
@@ -267,13 +336,14 @@ public final class MainActivity extends Activity {
             confidenceView.setText("可信度：不足");
             confidenceView.setTextColor(AMBER);
             statusView.setText(result.note);
-            alternativesView.setText("其他可能转速：等待有效谱峰");
+            alternativesView.setText("潜在转速：等待有效谱峰");
             detailView.setText(result.sampleRateHz > 0
                     ? String.format(Locale.US, "已采集 %.1f 秒数据", result.durationSeconds)
                     : "等待传感器数据");
             chart.clear();
         }
-        noteView.setText(result.note);
+        // Detailed diagnostic messages are available in the status line and log;
+        // the safety warning lives in the settings dialog to preserve screen space.
     }
 
     private void exportCsv() {
@@ -332,10 +402,10 @@ public final class MainActivity extends Activity {
 
     private LinearLayout vertical() { LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.VERTICAL); return l; }
     private LinearLayout horizontal() { LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.HORIZONTAL); return l; }
-    private LinearLayout card() {
+    private LinearLayout compactCard() {
         LinearLayout l = vertical();
-        l.setPadding(dp(17),dp(16),dp(17),dp(16));
-        l.setBackground(round(CARD, 17));
+        l.setPadding(dp(12), dp(9), dp(12), dp(10));
+        l.setBackground(round(CARD, 14));
         return l;
     }
     private GradientDrawable round(int color, int radius) {
